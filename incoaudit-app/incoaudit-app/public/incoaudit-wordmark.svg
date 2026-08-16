@@ -1,0 +1,30 @@
+<svg viewBox="0 0 760 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="squircle2">
+      <rect x="0" y="0" width="180" height="180" rx="42" ry="42"/>
+    </clipPath>
+  </defs>
+
+  <g transform="translate(10,10)">
+    <rect x="0" y="0" width="180" height="180" rx="42" ry="42" fill="#16261F"/>
+    <g clip-path="url(#squircle2)">
+      <path d="M90 32
+               C 106 42, 122 46, 134 46
+               L 134 92
+               C 134 123, 113 143, 90 154
+               C 67 143, 46 123, 46 92
+               L 46 46
+               C 58 46, 74 42, 90 32 Z"
+            fill="#1F6F5C" stroke="#FAF8F2" stroke-opacity="0.35" stroke-width="2"/>
+      <rect x="64" y="104" width="12" height="23" rx="2" fill="#FAF8F2"/>
+      <rect x="81" y="91" width="12" height="36" rx="2" fill="#FAF8F2"/>
+      <rect x="98" y="75" width="12" height="52" rx="2" fill="#F3E9D3"/>
+      <circle cx="127" cy="53" r="16" fill="#B98A2E" stroke="#16261F" stroke-width="2.5"/>
+      <path d="M120 53 L125.5 58.5 L136 46" fill="none" stroke="#FAF8F2"
+            stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <text x="212" y="122" font-family="Fraunces, Georgia, serif" font-size="80" font-weight="600" fill="#16261F">Inco<tspan fill="#1F6F5C">Audit</tspan></text>
+  <text x="214" y="152" font-family="'IBM Plex Sans', Arial, sans-serif" font-size="17" letter-spacing="3" fill="#6B7268">EXPENSE TRACKING · VERIFIED</text>
+</svg>
