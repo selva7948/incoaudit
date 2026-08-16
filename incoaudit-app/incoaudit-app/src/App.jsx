@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart, Line, PieChart, Pie, Cell, BarChart, Bar,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend
@@ -6,7 +6,8 @@ import {
 import {
   LayoutDashboard, BookOpen, TrendingUp, Bell, Target, Settings,
   Plus, ArrowUpRight, ArrowDownRight, AlertTriangle, CheckCircle2,
-  PiggyBank, Trash2, X, Smartphone, Sparkles, RefreshCw, Check
+  PiggyBank, Trash2, X, Upload, Download, RotateCcw, Smartphone,
+  Sparkles, Check
 } from "lucide-react";
 
 // ---------- design tokens ----------
@@ -34,56 +35,29 @@ const CAT_COLORS = {
 
 const PAY_MODES = ["UPI", "Card", "Cash", "Bank Transfer"];
 
-function monthKey(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }
+const DEFAULT_BUDGETS = {
+  Groceries: 8000, Rent: 18000, Utilities: 3000, Transport: 3500,
+  Dining: 2800, Entertainment: 2000, Healthcare: 1500, Shopping: 4000, Other: 1500
+};
+
+const STORAGE_KEY = "incoaudit-phase1-data";
+const BACKUP_VERSION = 1;
+
+function monthKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
 function monthLabel(key) {
   const [y, m] = key.split("-");
   return new Date(Number(y), Number(m) - 1, 1).toLocaleString("en-US", { month: "short" });
 }
 function fmt(n) {
-  return "₹" + Math.round(n).toLocaleString("en-IN");
+  return "₹" + Math.round(Number(n) || 0).toLocaleString("en-IN");
 }
-function uid() { return Math.random().toString(36).slice(2, 10); }
-
-// ---------- deterministic seed data (5 months incl. current) ----------
-function buildSeed() {
-  const today = new Date();
-  const months = [];
-  for (let i = 4; i >= 0; i--) {
-    months.push(new Date(today.getFullYear(), today.getMonth() - i, 1));
-  }
-  const base = {
-    Rent: 18000, Utilities: 2600, Groceries: 7200, Transport: 3100,
-    Dining: 2400, Entertainment: 1500, Healthcare: 900, Shopping: 3600, Other: 1100
-  };
-  const drift = {
-    Rent: 0, Utilities: 60, Groceries: 220, Transport: 90,
-    Dining: 180, Entertainment: 40, Healthcare: 20, Shopping: 260, Other: 15
-  };
-  let txns = [];
-  months.forEach((m, idx) => {
-    CATEGORIES.forEach(cat => {
-      const amt = Math.max(200, base[cat] + drift[cat] * idx + (Math.sin(idx + cat.length) * 180));
-      const day = 3 + (cat.length % 20);
-      const d = new Date(m.getFullYear(), m.getMonth(), Math.min(day, 27));
-      txns.push({
-        id: uid(), type: "expense", amount: Math.round(amt), category: cat,
-        date: d.toISOString().slice(0, 10),
-        mode: PAY_MODES[cat.length % PAY_MODES.length],
-        note: cat === "Rent" ? "Monthly rent" : cat === "Utilities" ? "Electricity + water" : ""
-      });
-    });
-    // income
-    const incomeDate = new Date(m.getFullYear(), m.getMonth(), 1);
-    txns.push({
-      id: uid(), type: "income", amount: 62000, category: "Salary",
-      date: incomeDate.toISOString().slice(0, 10), mode: "Bank Transfer", note: "Monthly salary"
-    });
-  });
-  return txns;
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
 }
 
-// ---------- merchant -> category inference (keyword rules, same approach real
-// SMS/AA-based parsers use once they have the raw merchant string) ----------
+// ---------- merchant -> category inference ----------
 const MERCHANT_RULES = [
   { kw: ["swiggy", "zomato", "dominos", "domino's", "kfc", "mcdonald", "starbucks", "cafe", "pizza", "biryani"], cat: "Dining" },
   { kw: ["uber", "ola", "rapido", "irctc", "petrol", "fuel", "metro", "fastag"], cat: "Transport" },
@@ -95,53 +69,14 @@ const MERCHANT_RULES = [
   { kw: ["landlord", "rent", "housing"], cat: "Rent" },
 ];
 function inferCategory(merchant) {
-  const m = merchant.toLowerCase();
+  const m = String(merchant || "").toLowerCase();
   for (const rule of MERCHANT_RULES) {
     if (rule.kw.some(k => m.includes(k))) return rule.cat;
   }
   return "Other";
 }
 
-const MOCK_PROVIDERS = [
-  { id: "gpay", name: "Google Pay", color: "#4285F4" },
-  { id: "phonepe", name: "PhonePe", color: "#5F259F" },
-  { id: "paytm", name: "Paytm", color: "#00BAF2" },
-];
-
-const MOCK_MERCHANTS = [
-  "Swiggy", "Zomato", "Uber", "Ola", "BigBasket", "Amazon", "Flipkart",
-  "Netflix", "BESCOM Electricity", "Apollo Pharmacy", "DMart", "Starbucks",
-  "Airtel Broadband", "BookMyShow", "Zepto"
-];
-
-// Simulates what an SMS/notification listener or an Account Aggregator
-// consent pull would hand back: a raw list of merchant + amount + timestamp.
-// Wiring this to a real device replaces this function only — everything
-// downstream (parsing, categorization, review) stays the same.
-function fetchMockPaymentFeed(provider) {
-  const count = 5 + Math.floor(Math.random() * 4);
-  const feed = [];
-  for (let i = 0; i < count; i++) {
-    const merchant = MOCK_MERCHANTS[Math.floor(Math.random() * MOCK_MERCHANTS.length)];
-    const amount = Math.round(80 + Math.random() * 1800);
-    const daysAgo = Math.floor(Math.random() * 6);
-    const d = new Date();
-    d.setDate(d.getDate() - daysAgo);
-    feed.push({
-      id: uid(),
-      raw: `Paid ${fmt(amount)} to ${merchant} via ${provider.name} UPI`,
-      merchant,
-      amount,
-      date: d.toISOString().slice(0, 10),
-      category: inferCategory(merchant),
-      selected: true,
-    });
-  }
-  return feed;
-}
-
 function linearForecast(values) {
-  // simple least-squares slope over index -> next value
   const n = values.length;
   if (n < 2) return values[0] || 0;
   const xs = values.map((_, i) => i);
@@ -158,25 +93,104 @@ function linearForecast(values) {
   return Math.max(0, next);
 }
 
+function normalizeTransaction(t) {
+  if (!t || typeof t !== "object") return null;
+  const amount = Number(t.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  const type = t.type === "income" ? "income" : "expense";
+  const date = typeof t.date === "string" && t.date ? t.date : new Date().toISOString().slice(0, 10);
+  const category = type === "income" ? (t.category || "Salary") : (CATEGORIES.includes(t.category) ? t.category : "Other");
+
+  return {
+    id: String(t.id || uid()),
+    type,
+    amount,
+    category,
+    date,
+    mode: PAY_MODES.includes(t.mode) ? t.mode : "UPI",
+    note: String(t.note || "")
+  };
+}
+
+function normalizeGoals(goals) {
+  if (!Array.isArray(goals)) return [];
+  return goals.map(g => ({
+    id: String(g?.id || uid()),
+    name: String(g?.name || "Savings Goal"),
+    target: Math.max(0, Number(g?.target) || 0),
+    saved: Math.max(0, Number(g?.saved) || 0)
+  })).filter(g => g.name && g.target > 0);
+}
+
+function normalizeBudgets(budgets) {
+  const source = budgets && typeof budgets === "object" ? budgets : {};
+  return CATEGORIES.reduce((acc, cat) => {
+    const value = Number(source[cat]);
+    acc[cat] = Number.isFinite(value) && value >= 0 ? value : DEFAULT_BUDGETS[cat];
+    return acc;
+  }, {});
+}
+
+function loadStoredData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return {
+      txns: Array.isArray(parsed.txns) ? parsed.txns.map(normalizeTransaction).filter(Boolean) : [],
+      budgets: normalizeBudgets(parsed.budgets),
+      goals: normalizeGoals(parsed.goals)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// ---------- app ----------
 export default function IncoAudit() {
+  const stored = useMemo(() => loadStoredData(), []);
   const [tab, setTab] = useState("dashboard");
-  const [txns, setTxns] = useState(buildSeed);
-  const [budgets, setBudgets] = useState({
-    Groceries: 8000, Rent: 18000, Utilities: 3000, Transport: 3500,
-    Dining: 2800, Entertainment: 2000, Healthcare: 1500, Shopping: 4000, Other: 1500
-  });
-  const [goals, setGoals] = useState([
-    { id: uid(), name: "Emergency Fund", target: 100000, saved: 34000 },
-    { id: uid(), name: "New Laptop", target: 60000, saved: 21000 }
-  ]);
+  const [txns, setTxns] = useState(() => stored?.txns || []);
+  const [budgets, setBudgets] = useState(() => stored?.budgets || DEFAULT_BUDGETS);
+  const [goals, setGoals] = useState(() => stored?.goals || []);
   const [showAdd, setShowAdd] = useState(false);
   const [showGoal, setShowGoal] = useState(false);
-  const [showImport, setShowImport] = useState(false);
+  const [showBackup, setShowBackup] = useState(false);
+  const [notice, setNotice] = useState("");
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ txns, budgets, goals }));
+    } catch {
+      setNotice("Could not save data to local storage.");
+    }
+  }, [txns, budgets, goals]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(""), 3500);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   const months = useMemo(() => {
     const set = new Set(txns.map(t => monthKey(new Date(t.date))));
     return Array.from(set).sort();
   }, [txns]);
+
   const currentMonth = months[months.length - 1];
 
   const byMonthCategory = useMemo(() => {
@@ -192,14 +206,16 @@ export default function IncoAudit() {
   const monthlySeries = useMemo(() => months.map(mk => {
     const cats = byMonthCategory[mk] || {};
     const spend = Object.values(cats).reduce((a, b) => a + b, 0);
-    const income = txns.filter(t => t.type === "income" && monthKey(new Date(t.date)) === mk)
+    const income = txns
+      .filter(t => t.type === "income" && monthKey(new Date(t.date)) === mk)
       .reduce((a, b) => a + b.amount, 0);
     return { month: monthLabel(mk), key: mk, spend, income, net: income - spend };
   }), [months, byMonthCategory, txns]);
 
   const currentCats = byMonthCategory[currentMonth] || {};
   const currentSpend = Object.values(currentCats).reduce((a, b) => a + b, 0);
-  const currentIncome = txns.filter(t => t.type === "income" && monthKey(new Date(t.date)) === currentMonth)
+  const currentIncome = txns
+    .filter(t => t.type === "income" && monthKey(new Date(t.date)) === currentMonth)
     .reduce((a, b) => a + b.amount, 0);
   const totalSaved = goals.reduce((a, g) => a + g.saved, 0);
 
@@ -232,28 +248,97 @@ export default function IncoAudit() {
   function addTxn(t) {
     setTxns(prev => [{ ...t, id: uid() }, ...prev]);
     setShowAdd(false);
+    setNotice("Transaction saved locally.");
   }
-  function importTxns(items) {
-    const mapped = items.map(it => ({
-      id: uid(), type: "expense", amount: it.amount, category: it.category,
-      date: it.date, mode: "UPI", note: it.merchant
-    }));
-    setTxns(prev => [...mapped, ...prev]);
-    setShowImport(false);
+
+  function importBackup(backup) {
+    const imported = Array.isArray(backup.transactions)
+      ? backup.transactions.map(normalizeTransaction).filter(Boolean)
+      : [];
+
+    if (!Array.isArray(backup.transactions)) {
+      throw new Error("Backup does not contain a valid transactions array.");
+    }
+
+    const importedBudgets = backup.budgets ? normalizeBudgets(backup.budgets) : budgets;
+    const importedGoals = Array.isArray(backup.goals) ? normalizeGoals(backup.goals) : goals;
+
+    // Backup import is intentionally a REPLACE operation:
+    // only transactions present in the uploaded backup should appear.
+    setTxns(imported);
+    setBudgets(importedBudgets);
+    setGoals(importedGoals);
+    setShowBackup(false);
+    setNotice(`${imported.length} transactions restored from backup.`);
   }
+
+  function handleBackupFile(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        if (!parsed || typeof parsed !== "object") throw new Error("Invalid backup file.");
+        importBackup(parsed);
+      } catch (error) {
+        setNotice(`Import failed: ${error.message || "Invalid JSON backup."}`);
+      }
+    };
+    reader.onerror = () => setNotice("Could not read the backup file.");
+    reader.readAsText(file);
+  }
+
+  function exportBackup() {
+    const backup = {
+      version: BACKUP_VERSION,
+      app: "IncoAudit",
+      exportedAt: new Date().toISOString(),
+      transactions: txns,
+      budgets,
+      goals
+    };
+    downloadJson(
+      `incoaudit-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      backup
+    );
+    setNotice("Backup exported.");
+  }
+
+  function clearLocalData() {
+    const confirmed = window.confirm(
+      "Clear all locally stored transactions, budgets and goals? This cannot be undone unless you have a backup."
+    );
+    if (!confirmed) return;
+
+    setTxns([]);
+    setBudgets(DEFAULT_BUDGETS);
+    setGoals([]);
+    localStorage.removeItem(STORAGE_KEY);
+    setNotice("Local data cleared.");
+  }
+
   function removeTxn(id) {
     setTxns(prev => prev.filter(t => t.id !== id));
+    setNotice("Transaction deleted.");
   }
+
   function addGoalFn(g) {
     setGoals(prev => [...prev, { ...g, id: uid() }]);
     setShowGoal(false);
+    setNotice("Goal saved locally.");
   }
+
   function contributeGoal(id, amt) {
     setGoals(prev => prev.map(g => g.id === id ? { ...g, saved: g.saved + amt } : g));
   }
+
   function removeGoal(id) {
     setGoals(prev => prev.filter(g => g.id !== id));
   }
+
   function updateBudget(cat, val) {
     setBudgets(prev => ({ ...prev, [cat]: val }));
   }
@@ -287,7 +372,6 @@ export default function IncoAudit() {
         ::-webkit-scrollbar-thumb { background:${LINE}; border-radius:4px; }
       `}</style>
 
-      {/* SIDEBAR */}
       <div style={{
         width: 210, borderRight: `1px solid ${LINE}`, padding: "22px 14px",
         display: "flex", flexDirection: "column", gap: 4, flexShrink: 0
@@ -322,27 +406,57 @@ export default function IncoAudit() {
           );
         })}
         <div style={{ marginTop: "auto", padding: "10px 8px", fontSize: 10.5, color: SLATE, lineHeight: 1.5 }}>
-          IncoAudit demo · data resets on refresh
+          IncoAudit · local data
         </div>
       </div>
 
-      {/* MAIN */}
       <div style={{ flex: 1, padding: "26px 32px", minWidth: 0 }}>
+        {notice && (
+          <div style={{
+            position: "fixed", right: 24, top: 20, zIndex: 100,
+            background: INK, color: PAPER, padding: "10px 14px", borderRadius: 8,
+            fontSize: 12.5, boxShadow: "0 8px 30px rgba(0,0,0,.12)"
+          }}>
+            {notice}
+          </div>
+        )}
+
         {tab === "dashboard" && (
           <Dashboard {...{ currentIncome, currentSpend, totalSaved, monthlySeries, pieData, riskAlerts, txns, setShowAdd }} />
         )}
         {tab === "ledger" && (
-          <Ledger {...{ txns, setShowAdd, removeTxn, setShowImport }} />
+          <Ledger {...{ txns, setShowAdd, removeTxn, setShowBackup }} />
         )}
         {tab === "predictions" && <Predictions predictions={predictions} monthlySeries={monthlySeries} />}
         {tab === "alerts" && <Alerts alerts={alerts} />}
         {tab === "goals" && <Goals {...{ goals, setShowGoal, contributeGoal, removeGoal }} />}
-        {tab === "settings" && <BudgetSettings budgets={budgets} updateBudget={updateBudget} />}
+        {tab === "settings" && (
+          <BudgetSettings
+            budgets={budgets}
+            updateBudget={updateBudget}
+            onImport={() => setShowBackup(true)}
+            onExport={exportBackup}
+            onClear={clearLocalData}
+          />
+        )}
       </div>
 
       {showAdd && <AddTxnModal onClose={() => setShowAdd(false)} onAdd={addTxn} />}
       {showGoal && <AddGoalModal onClose={() => setShowGoal(false)} onAdd={addGoalFn} />}
-      {showImport && <ImportModal onClose={() => setShowImport(false)} onImport={importTxns} />}
+      {showBackup && (
+        <BackupModal
+          onClose={() => setShowBackup(false)}
+          onImport={() => fileInputRef.current?.click()}
+          onExport={exportBackup}
+        />
+      )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,application/json"
+        onChange={handleBackupFile}
+        style={{ display: "none" }}
+      />
     </div>
   );
 }
@@ -388,38 +502,55 @@ function Dashboard({ currentIncome, currentSpend, totalSaved, monthlySeries, pie
         <StatCard label="Total saved" value={fmt(totalSaved)} sub="across goals" />
       </div>
 
-      <div style={{ display: "flex", gap: 14, marginBottom: 20 }}>
-        <div className="sf-card" style={{ flex: 1.4, padding: 18 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Cashflow trend</div>
-          <ResponsiveContainer width="100%" height={220}>
-            <LineChart data={monthlySeries}>
-              <CartesianGrid stroke={LINE} vertical={false} />
-              <XAxis dataKey="month" tick={{ fontSize: 11, fill: SLATE }} axisLine={{ stroke: LINE }} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} width={50} />
-              <Tooltip formatter={(v) => fmt(v)} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${LINE}` }} />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Line type="monotone" dataKey="income" stroke={EMERALD} strokeWidth={2} dot={false} name="Income" />
-              <Line type="monotone" dataKey="spend" stroke={RUST} strokeWidth={2} dot={false} name="Spend" />
-            </LineChart>
-          </ResponsiveContainer>
+      {txns.length === 0 ? (
+        <div className="sf-card" style={{ padding: 28, marginBottom: 20, textAlign: "center" }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 7 }}>Your ledger is empty</div>
+          <div style={{ fontSize: 12.5, color: SLATE, lineHeight: 1.6 }}>
+            Import a transaction backup to populate IncoAudit, or log a transaction manually.
+          </div>
         </div>
-        <div className="sf-card" style={{ flex: 1, padding: 18 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Category split</div>
-          <ResponsiveContainer width="100%" height={220}>
-            <PieChart>
-              <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={45} outerRadius={78} paddingAngle={2}>
-                {pieData.map((d, i) => <Cell key={i} fill={CAT_COLORS[d.name]} />)}
-              </Pie>
-              <Tooltip formatter={(v) => fmt(v)} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${LINE}` }} />
-            </PieChart>
-          </ResponsiveContainer>
+      ) : (
+        <div style={{ display: "flex", gap: 14, marginBottom: 20 }}>
+          <div className="sf-card" style={{ flex: 1.4, padding: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Cashflow trend</div>
+            <ResponsiveContainer width="100%" height={220}>
+              <LineChart data={monthlySeries}>
+                <CartesianGrid stroke={LINE} vertical={false} />
+                <XAxis dataKey="month" tick={{ fontSize: 11, fill: SLATE }} axisLine={{ stroke: LINE }} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} width={50} />
+                <Tooltip formatter={(v) => fmt(v)} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${LINE}` }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Line type="monotone" dataKey="income" stroke={EMERALD} strokeWidth={2} dot={false} name="Income" />
+                <Line type="monotone" dataKey="spend" stroke={RUST} strokeWidth={2} dot={false} name="Spend" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="sf-card" style={{ flex: 1, padding: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Category split</div>
+            {pieData.length === 0 ? (
+              <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: SLATE, fontSize: 12 }}>
+                No expense data for the current month.
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={220}>
+                <PieChart>
+                  <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={45} outerRadius={78} paddingAngle={2}>
+                    {pieData.map((d, i) => <Cell key={i} fill={CAT_COLORS[d.name]} />)}
+                  </Pie>
+                  <Tooltip formatter={(v) => fmt(v)} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${LINE}` }} />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       <div style={{ display: "flex", gap: 14 }}>
         <div className="sf-card" style={{ flex: 1.4, padding: 18 }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Recent ledger entries</div>
-          {recent.map(t => <LedgerRow key={t.id} t={t} />)}
+          {recent.length === 0
+            ? <div style={{ fontSize: 12.5, color: SLATE }}>No transactions yet.</div>
+            : recent.map(t => <LedgerRow key={t.id} t={t} />)}
         </div>
         <div className="sf-card" style={{ flex: 1, padding: 18 }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
@@ -465,16 +596,16 @@ function LedgerRow({ t, onDelete }) {
   );
 }
 
-function Ledger({ txns, setShowAdd, removeTxn, setShowImport }) {
+function Ledger({ txns, setShowAdd, removeTxn, setShowBackup }) {
   return (
     <div>
       <SectionTitle eyebrow={`${txns.length} entries`} title="Digital Ledger"
         action={
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="sf-btn" onClick={() => setShowImport(true)} style={{
+            <button className="sf-btn" onClick={() => setShowBackup(true)} style={{
               display: "flex", alignItems: "center", gap: 6, background: EMERALD_SOFT, color: EMERALD,
               padding: "9px 14px", borderRadius: 7, fontSize: 13, fontWeight: 600
-            }}><Smartphone size={14} /> Connect payment app</button>
+            }}><Upload size={14} />Backup</button>
             <button className="sf-btn" onClick={() => setShowAdd(true)} style={{
               display: "flex", alignItems: "center", gap: 6, background: INK, color: PAPER,
               padding: "9px 14px", borderRadius: 7, fontSize: 13, fontWeight: 500
@@ -482,18 +613,24 @@ function Ledger({ txns, setShowAdd, removeTxn, setShowImport }) {
           </div>
         } />
       <div className="sf-card" style={{ padding: 18, maxHeight: 560, overflowY: "auto" }}>
-        {txns.slice(0, 100).map(t => <LedgerRow key={t.id} t={t} onDelete={removeTxn} />)}
+        {txns.length === 0 ? (
+          <div style={{ padding: 28, textAlign: "center", color: SLATE, fontSize: 12.5 }}>
+            No transactions loaded. Import a backup file to restore transactions.
+          </div>
+        ) : (
+          txns.slice(0, 100).map(t => <LedgerRow key={t.id} t={t} onDelete={removeTxn} />)
+        )}
       </div>
     </div>
   );
 }
 
-function Predictions({ predictions, monthlySeries }) {
+function Predictions({ predictions }) {
   const totalNext = predictions.reduce((a, p) => a + p.next, 0);
   const totalLast = predictions.reduce((a, p) => a + p.last, 0);
   return (
     <div>
-      <SectionTitle eyebrow="AI Predictive Analytics Engine" title="Next Month Forecast" />
+      <SectionTitle eyebrow="Predictive Analytics Engine" title="Next Month Forecast" />
       <div className="sf-card" style={{ padding: 18, marginBottom: 18 }}>
         <div style={{ display: "flex", gap: 24, marginBottom: 14 }}>
           <div>
@@ -549,8 +686,7 @@ function Predictions({ predictions, monthlySeries }) {
         </table>
       </div>
       <div style={{ fontSize: 11, color: SLATE, marginTop: 10, lineHeight: 1.6 }}>
-        Forecast uses a least-squares trend line over your logged monthly history per category —
-        a lightweight stand-in for the SageMaker (XGBoost) engine described in the spec.
+        Forecast uses a least-squares trend line over your logged monthly history per category.
       </div>
     </div>
   );
@@ -573,14 +709,12 @@ function Alerts({ alerts }) {
                 width: 34, height: 34, borderRadius: "50%", background: bg, display: "flex",
                 alignItems: "center", justifyContent: "center", flexShrink: 0
               }}>
-                {over ? <AlertTriangle size={16} color={color} /> : risk ? <AlertTriangle size={16} color={color} /> : <CheckCircle2 size={16} color={color} />}
+                {over || risk ? <AlertTriangle size={16} color={color} /> : <CheckCircle2 size={16} color={color} />}
               </div>
               <div style={{ flex: 1 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                   <span style={{ fontSize: 13.5, fontWeight: 600 }}>{a.category}</span>
-                  <span className="sf-mono" style={{ fontSize: 12.5, color }}>
-                    {fmt(a.spent)} / {fmt(a.limit)}
-                  </span>
+                  <span className="sf-mono" style={{ fontSize: 12.5, color }}>{fmt(a.spent)} / {fmt(a.limit)}</span>
                 </div>
                 <div style={{ height: 6, background: LINE, borderRadius: 4, overflow: "hidden" }}>
                   <div style={{ height: "100%", width: `${Math.min(100, a.pct)}%`, background: color }} />
@@ -605,47 +739,53 @@ function Goals({ goals, setShowGoal, contributeGoal, removeGoal }) {
           display: "flex", alignItems: "center", gap: 6, background: INK, color: PAPER,
           padding: "9px 14px", borderRadius: 7, fontSize: 13, fontWeight: 500
         }}><Plus size={14} /> New goal</button>} />
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-        {goals.map(g => {
-          const pct = Math.min(100, (g.saved / g.target) * 100);
-          const done = pct >= 100;
-          return (
-            <div key={g.id} className="sf-card" style={{ padding: 18 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{
-                    width: 30, height: 30, borderRadius: "50%", background: GOLD_SOFT,
-                    display: "flex", alignItems: "center", justifyContent: "center"
-                  }}><PiggyBank size={15} color={GOLD} /></div>
-                  <div style={{ fontSize: 14.5, fontWeight: 600 }}>{g.name}</div>
+      {goals.length === 0 ? (
+        <div className="sf-card" style={{ padding: 28, textAlign: "center", color: SLATE, fontSize: 12.5 }}>
+          No savings goals yet. Create one to start tracking progress.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          {goals.map(g => {
+            const pct = Math.min(100, (g.saved / g.target) * 100);
+            const done = pct >= 100;
+            return (
+              <div key={g.id} className="sf-card" style={{ padding: 18 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{
+                      width: 30, height: 30, borderRadius: "50%", background: GOLD_SOFT,
+                      display: "flex", alignItems: "center", justifyContent: "center"
+                    }}><PiggyBank size={15} color={GOLD} /></div>
+                    <div style={{ fontSize: 14.5, fontWeight: 600 }}>{g.name}</div>
+                  </div>
+                  <button className="sf-btn" onClick={() => removeGoal(g.id)} style={{ background: "none", color: SLATE, padding: 4 }}>
+                    <Trash2 size={13} />
+                  </button>
                 </div>
-                <button className="sf-btn" onClick={() => removeGoal(g.id)} style={{ background: "none", color: SLATE, padding: 4 }}>
-                  <Trash2 size={13} />
-                </button>
+                <div className="sf-mono" style={{ fontSize: 12.5, marginBottom: 6, color: SLATE }}>
+                  {fmt(g.saved)} of {fmt(g.target)} {done && "· complete"}
+                </div>
+                <div style={{ height: 8, background: LINE, borderRadius: 4, overflow: "hidden", marginBottom: 12 }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: done ? EMERALD : GOLD }} />
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="sf-btn" onClick={() => contributeGoal(g.id, 1000)} style={{
+                    fontSize: 12, background: EMERALD_SOFT, color: EMERALD, padding: "6px 10px", borderRadius: 6, fontWeight: 500
+                  }}>+ ₹1,000</button>
+                  <button className="sf-btn" onClick={() => contributeGoal(g.id, 5000)} style={{
+                    fontSize: 12, background: EMERALD_SOFT, color: EMERALD, padding: "6px 10px", borderRadius: 6, fontWeight: 500
+                  }}>+ ₹5,000</button>
+                </div>
               </div>
-              <div className="sf-mono" style={{ fontSize: 12.5, marginBottom: 6, color: SLATE }}>
-                {fmt(g.saved)} of {fmt(g.target)} {done && "· complete"}
-              </div>
-              <div style={{ height: 8, background: LINE, borderRadius: 4, overflow: "hidden", marginBottom: 12 }}>
-                <div style={{ height: "100%", width: `${pct}%`, background: done ? EMERALD : GOLD }} />
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="sf-btn" onClick={() => contributeGoal(g.id, 1000)} style={{
-                  fontSize: 12, background: EMERALD_SOFT, color: EMERALD, padding: "6px 10px", borderRadius: 6, fontWeight: 500
-                }}>+ ₹1,000</button>
-                <button className="sf-btn" onClick={() => contributeGoal(g.id, 5000)} style={{
-                  fontSize: 12, background: EMERALD_SOFT, color: EMERALD, padding: "6px 10px", borderRadius: 6, fontWeight: 500
-                }}>+ ₹5,000</button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
-function BudgetSettings({ budgets, updateBudget }) {
+function BudgetSettings({ budgets, updateBudget, onImport, onExport, onClear }) {
   return (
     <div>
       <SectionTitle eyebrow="User & Budget Onboarding" title="Category Budgets" />
@@ -661,10 +801,56 @@ function BudgetSettings({ budgets, updateBudget }) {
           </div>
         ))}
       </div>
-      <div style={{ fontSize: 11, color: SLATE, marginTop: 10 }}>
-        These thresholds power the Smart Alert Verification module on the Alerts tab.
+
+      <div className="sf-card" style={{ padding: 18, marginTop: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Local data & backups</div>
+        <div style={{ fontSize: 11.5, color: SLATE, lineHeight: 1.5, marginBottom: 14 }}>
+          Transactions, budgets and goals are saved in this browser. Backup files let you move or restore your data.
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <button className="sf-btn" onClick={onImport} style={{
+            display: "flex", alignItems: "center", gap: 6, background: EMERALD_SOFT, color: EMERALD,
+            padding: "9px 12px", borderRadius: 7, fontSize: 12.5, fontWeight: 600
+          }}><Upload size={14} /> Import backup</button>
+          <button className="sf-btn" onClick={onExport} style={{
+            display: "flex", alignItems: "center", gap: 6, background: INK, color: PAPER,
+            padding: "9px 12px", borderRadius: 7, fontSize: 12.5, fontWeight: 500
+          }}><Download size={14} /> Export backup</button>
+          <button className="sf-btn" onClick={onClear} style={{
+            display: "flex", alignItems: "center", gap: 6, background: RUST_SOFT, color: RUST,
+            padding: "9px 12px", borderRadius: 7, fontSize: 12.5, fontWeight: 600
+          }}><RotateCcw size={14} /> Clear local data</button>
+        </div>
       </div>
     </div>
+  );
+}
+
+function BackupModal({ onClose, onImport, onExport }) {
+  return (
+    <ModalShell title="Transaction backup" onClose={onClose}>
+      <div style={{ fontSize: 12, color: SLATE, marginBottom: 14, lineHeight: 1.6 }}>
+        Importing a backup <b>replaces</b> the current local data. This means only the transactions contained in the uploaded backup will appear in the ledger.
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+        <button className="sf-btn" onClick={onImport} style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 7,
+          background: EMERALD, color: "#fff", padding: "10px 12px", borderRadius: 7,
+          fontSize: 13, fontWeight: 600
+        }}><Upload size={14} /> Choose backup JSON</button>
+
+        <button className="sf-btn" onClick={onExport} style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 7,
+          background: INK, color: PAPER, padding: "10px 12px", borderRadius: 7,
+          fontSize: 13, fontWeight: 500
+        }}><Download size={14} /> Export current backup</button>
+      </div>
+
+      <div style={{ marginTop: 14, padding: 10, background: GOLD_SOFT, borderRadius: 7, fontSize: 11, color: INK, lineHeight: 1.5 }}>
+        Backup format: JSON · version {BACKUP_VERSION}
+      </div>
+    </ModalShell>
   );
 }
 
@@ -737,101 +923,6 @@ function AddTxnModal({ onClose, onAdd }) {
           background: EMERALD, color: "#fff", padding: "10px 0", borderRadius: 7, fontSize: 13.5, fontWeight: 600, marginTop: 4
         }}>Add entry</button>
       </div>
-    </ModalShell>
-  );
-}
-
-function ImportModal({ onClose, onImport }) {
-  const [stage, setStage] = useState("pick"); // pick -> fetching -> review
-  const [provider, setProvider] = useState(null);
-  const [feed, setFeed] = useState([]);
-
-  function connect(p) {
-    setProvider(p);
-    setStage("fetching");
-    setTimeout(() => {
-      setFeed(fetchMockPaymentFeed(p));
-      setStage("review");
-    }, 900);
-  }
-
-  function toggle(id) {
-    setFeed(prev => prev.map(f => f.id === id ? { ...f, selected: !f.selected } : f));
-  }
-  function updateCat(id, cat) {
-    setFeed(prev => prev.map(f => f.id === id ? { ...f, category: cat } : f));
-  }
-  function confirm() {
-    onImport(feed.filter(f => f.selected));
-  }
-
-  return (
-    <ModalShell title="Connect payment app" onClose={onClose}>
-      {stage === "pick" && (
-        <div>
-          <div style={{ fontSize: 12, color: SLATE, marginBottom: 14, lineHeight: 1.5 }}>
-            This demo simulates the fetch since a browser can't read SMS or hold bank
-            consent — pick a provider to see the auto-categorization flow.
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {MOCK_PROVIDERS.map(p => (
-              <button key={p.id} className="sf-btn" onClick={() => connect(p)} style={{
-                display: "flex", alignItems: "center", gap: 10, padding: "11px 14px",
-                borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontSize: 13.5, fontWeight: 500
-              }}>
-                <span style={{ width: 10, height: 10, borderRadius: "50%", background: p.color }} />
-                {p.name}
-                <span style={{ marginLeft: "auto", fontSize: 11, color: SLATE }}>Connect</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {stage === "fetching" && (
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, padding: "24px 0" }}>
-          <RefreshCw size={22} color={EMERALD} style={{ animation: "sf-spin 1s linear infinite" }} />
-          <div style={{ fontSize: 13, color: SLATE }}>Fetching recent {provider?.name} transactions…</div>
-          <style>{`@keyframes sf-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-        </div>
-      )}
-
-      {stage === "review" && (
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: SLATE, marginBottom: 12 }}>
-            <Sparkles size={13} color={GOLD} /> Auto-categorized by merchant — review before importing
-          </div>
-          <div style={{ maxHeight: 320, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
-            {feed.map(f => (
-              <div key={f.id} style={{
-                display: "flex", alignItems: "center", gap: 8, padding: "8px 10px",
-                border: `1px solid ${LINE}`, borderRadius: 7, background: f.selected ? "#fff" : "#F4F2EB"
-              }}>
-                <button className="sf-btn" onClick={() => toggle(f.id)} style={{
-                  width: 18, height: 18, borderRadius: 4, flexShrink: 0,
-                  background: f.selected ? EMERALD : "#fff", border: `1px solid ${f.selected ? EMERALD : LINE}`,
-                  display: "flex", alignItems: "center", justifyContent: "center"
-                }}>
-                  {f.selected && <Check size={12} color="#fff" />}
-                </button>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 500 }}>{f.merchant}</div>
-                  <div style={{ fontSize: 10.5, color: SLATE }}>{f.date}</div>
-                </div>
-                <select className="sf-input" value={f.category} onChange={e => updateCat(f.id, e.target.value)}
-                  style={{ width: 118, fontSize: 11.5, padding: "5px 6px" }}>
-                  {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-                <div className="sf-mono" style={{ fontSize: 12.5, fontWeight: 600, width: 66, textAlign: "right" }}>{fmt(f.amount)}</div>
-              </div>
-            ))}
-          </div>
-          <button className="sf-btn" onClick={confirm} style={{
-            background: EMERALD, color: "#fff", padding: "10px 0", borderRadius: 7, fontSize: 13.5,
-            fontWeight: 600, marginTop: 14, width: "100%"
-          }}>Import {feed.filter(f => f.selected).length} transactions</button>
-        </div>
-      )}
     </ModalShell>
   );
 }
