@@ -7,7 +7,7 @@ import {
   LayoutDashboard, BookOpen, TrendingUp, Bell, Target, Settings,
   Plus, ArrowUpRight, ArrowDownRight, AlertTriangle, CheckCircle2,
   PiggyBank, Trash2, X, Upload, Download, RotateCcw, Smartphone,
-  Sparkles, Check
+  Sparkles, Check, Search, Filter, Pencil, Copy, FileCheck2, CalendarDays
 } from "lucide-react";
 
 // ---------- design tokens ----------
@@ -170,6 +170,7 @@ export default function IncoAudit() {
   const [showGoal, setShowGoal] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [notice, setNotice] = useState("");
+  const [pendingImport, setPendingImport] = useState(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -251,7 +252,7 @@ export default function IncoAudit() {
     setNotice("Transaction saved locally.");
   }
 
-  function importBackup(backup) {
+  function importBackup(backup, options = {}) {
     const imported = Array.isArray(backup.transactions)
       ? backup.transactions.map(normalizeTransaction).filter(Boolean)
       : [];
@@ -263,13 +264,24 @@ export default function IncoAudit() {
     const importedBudgets = backup.budgets ? normalizeBudgets(backup.budgets) : budgets;
     const importedGoals = Array.isArray(backup.goals) ? normalizeGoals(backup.goals) : goals;
 
-    // Backup import is intentionally a REPLACE operation:
-    // only transactions present in the uploaded backup should appear.
-    setTxns(imported);
+    let finalTransactions = imported;
+    if (options.excludeDuplicates) {
+      const seen = new Set();
+      finalTransactions = imported.filter(t => {
+        const key = transactionFingerprint(t);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    // Backup import remains a REPLACE operation.
+    setTxns(finalTransactions);
     setBudgets(importedBudgets);
     setGoals(importedGoals);
+    setPendingImport(null);
     setShowBackup(false);
-    setNotice(`${imported.length} transactions restored from backup.`);
+    setNotice(`${finalTransactions.length} transactions restored from backup.`);
   }
 
   function handleBackupFile(event) {
@@ -281,14 +293,31 @@ export default function IncoAudit() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result));
-        if (!parsed || typeof parsed !== "object") throw new Error("Invalid backup file.");
-        importBackup(parsed);
+        const review = validateBackup(parsed);
+        setPendingImport({
+          ...review,
+          fileName: file.name,
+          raw: parsed,
+          excludeDuplicates: review.duplicateCount > 0
+        });
+        setShowBackup(false);
       } catch (error) {
         setNotice(`Import failed: ${error.message || "Invalid JSON backup."}`);
       }
     };
     reader.onerror = () => setNotice("Could not read the backup file.");
     reader.readAsText(file);
+  }
+
+  function confirmPendingImport() {
+    if (!pendingImport) return;
+    try {
+      importBackup(pendingImport.raw, {
+        excludeDuplicates: pendingImport.excludeDuplicates
+      });
+    } catch (error) {
+      setNotice(`Import failed: ${error.message || "Could not import backup."}`);
+    }
   }
 
   function exportBackup() {
@@ -318,6 +347,11 @@ export default function IncoAudit() {
     setGoals([]);
     localStorage.removeItem(STORAGE_KEY);
     setNotice("Local data cleared.");
+  }
+
+  function updateTxn(updated) {
+    setTxns(prev => prev.map(t => t.id === updated.id ? updated : t));
+    setNotice("Transaction updated locally.");
   }
 
   function removeTxn(id) {
@@ -425,7 +459,7 @@ export default function IncoAudit() {
           <Dashboard {...{ currentIncome, currentSpend, totalSaved, monthlySeries, pieData, riskAlerts, txns, setShowAdd }} />
         )}
         {tab === "ledger" && (
-          <Ledger {...{ txns, setShowAdd, removeTxn, setShowBackup }} />
+          <Ledger {...{ txns, setShowAdd, removeTxn, setShowBackup, updateTxn }} />
         )}
         {tab === "predictions" && <Predictions predictions={predictions} monthlySeries={monthlySeries} />}
         {tab === "alerts" && <Alerts alerts={alerts} />}
@@ -448,6 +482,14 @@ export default function IncoAudit() {
           onClose={() => setShowBackup(false)}
           onImport={() => fileInputRef.current?.click()}
           onExport={exportBackup}
+        />
+      )}
+      {pendingImport && (
+        <ImportReviewModal
+          review={pendingImport}
+          onChange={setPendingImport}
+          onClose={() => setPendingImport(null)}
+          onConfirm={confirmPendingImport}
         />
       )}
       <input
@@ -569,7 +611,7 @@ function Dashboard({ currentIncome, currentSpend, totalSaved, monthlySeries, pie
   );
 }
 
-function LedgerRow({ t, onDelete }) {
+function LedgerRow({ t, onDelete, onEdit }) {
   const isIncome = t.type === "income";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: `1px dashed ${LINE}` }}>
@@ -587,8 +629,13 @@ function LedgerRow({ t, onDelete }) {
       <div className="sf-mono" style={{ fontSize: 13, fontWeight: 600, color: isIncome ? EMERALD : INK }}>
         {isIncome ? "+" : "−"}{fmt(t.amount)}
       </div>
+      {onEdit && (
+        <button className="sf-btn" onClick={onEdit} title="Edit transaction" style={{ background: "none", color: SLATE, padding: 4 }}>
+          <Pencil size={13} />
+        </button>
+      )}
       {onDelete && (
-        <button className="sf-btn" onClick={() => onDelete(t.id)} style={{ background: "none", color: SLATE, padding: 4 }}>
+        <button className="sf-btn" onClick={() => onDelete(t.id)} title="Delete transaction" style={{ background: "none", color: SLATE, padding: 4 }}>
           <Trash2 size={13} />
         </button>
       )}
@@ -596,31 +643,133 @@ function LedgerRow({ t, onDelete }) {
   );
 }
 
-function Ledger({ txns, setShowAdd, removeTxn, setShowBackup }) {
+function Ledger({ txns, setShowAdd, removeTxn, setShowBackup, updateTxn }) {
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("All");
+  const [mode, setMode] = useState("All");
+  const [type, setType] = useState("All");
+  const [month, setMonth] = useState("All");
+  const [showFilters, setShowFilters] = useState(false);
+  const [editing, setEditing] = useState(null);
+
+  const months = useMemo(() => {
+    return Array.from(new Set(txns.map(t => String(t.date || "").slice(0, 7))))
+      .filter(Boolean)
+      .sort()
+      .reverse();
+  }, [txns]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return txns.filter(t => {
+      const haystack = `${t.category || ""} ${t.note || ""} ${t.mode || ""} ${t.date || ""}`.toLowerCase();
+      return (!q || haystack.includes(q))
+        && (category === "All" || t.category === category)
+        && (mode === "All" || t.mode === mode)
+        && (type === "All" || t.type === type)
+        && (month === "All" || String(t.date || "").startsWith(month));
+    });
+  }, [txns, query, category, mode, type, month]);
+
+  function clearFilters() {
+    setQuery("");
+    setCategory("All");
+    setMode("All");
+    setType("All");
+    setMonth("All");
+  }
+
   return (
     <div>
-      <SectionTitle eyebrow={`${txns.length} entries`} title="Digital Ledger"
+      <SectionTitle
+        eyebrow={`${filtered.length} shown · ${txns.length} total`}
+        title="Digital Ledger"
         action={
           <div style={{ display: "flex", gap: 8 }}>
             <button className="sf-btn" onClick={() => setShowBackup(true)} style={{
               display: "flex", alignItems: "center", gap: 6, background: EMERALD_SOFT, color: EMERALD,
               padding: "9px 14px", borderRadius: 7, fontSize: 13, fontWeight: 600
-            }}><Upload size={14} />Backup</button>
+            }}><Upload size={14} /> Import backup</button>
             <button className="sf-btn" onClick={() => setShowAdd(true)} style={{
               display: "flex", alignItems: "center", gap: 6, background: INK, color: PAPER,
               padding: "9px 14px", borderRadius: 7, fontSize: 13, fontWeight: 500
             }}><Plus size={14} /> Log transaction</button>
           </div>
-        } />
-      <div className="sf-card" style={{ padding: 18, maxHeight: 560, overflowY: "auto" }}>
-        {txns.length === 0 ? (
-          <div style={{ padding: 28, textAlign: "center", color: SLATE, fontSize: 12.5 }}>
-            No transactions loaded. Import a backup file to restore transactions.
+        }
+      />
+
+      <div className="sf-card" style={{ padding: 14, marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ position: "relative", flex: 1 }}>
+            <Search size={14} color={SLATE} style={{ position: "absolute", left: 10, top: 10 }} />
+            <input
+              className="sf-input"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search category, merchant/note, date or payment mode..."
+              style={{ paddingLeft: 30 }}
+            />
           </div>
-        ) : (
-          txns.slice(0, 100).map(t => <LedgerRow key={t.id} t={t} onDelete={removeTxn} />)
+          <button className="sf-btn" onClick={() => setShowFilters(v => !v)} style={{
+            display: "flex", alignItems: "center", gap: 6, background: showFilters ? EMERALD_SOFT : "#F2F0E9",
+            color: showFilters ? EMERALD : INK, padding: "8px 11px", borderRadius: 6, fontSize: 12, fontWeight: 600
+          }}><Filter size={14} /> Filters</button>
+        </div>
+
+        {showFilters && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 10 }}>
+            <select className="sf-input" value={category} onChange={e => setCategory(e.target.value)}>
+              <option value="All">All categories</option>
+              {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+            </select>
+            <select className="sf-input" value={mode} onChange={e => setMode(e.target.value)}>
+              <option value="All">All payment modes</option>
+              {PAY_MODES.map(m => <option key={m}>{m}</option>)}
+            </select>
+            <select className="sf-input" value={type} onChange={e => setType(e.target.value)}>
+              <option value="All">Income + expense</option>
+              <option value="expense">Expenses</option>
+              <option value="income">Income</option>
+            </select>
+            <select className="sf-input" value={month} onChange={e => setMonth(e.target.value)}>
+              <option value="All">All months</option>
+              {months.map(m => <option key={m} value={m}>{monthLabel(m)} {m.slice(0, 4)}</option>)}
+            </select>
+            <button className="sf-btn" onClick={clearFilters} style={{
+              gridColumn: "1 / -1", justifySelf: "start", background: "none", color: SLATE,
+              padding: "4px 0", fontSize: 11.5
+            }}>Clear filters</button>
+          </div>
         )}
       </div>
+
+      <div className="sf-card" style={{ padding: 18, maxHeight: 560, overflowY: "auto" }}>
+        {filtered.length === 0 ? (
+          <div style={{ padding: 28, textAlign: "center", color: SLATE, fontSize: 12.5 }}>
+            {txns.length === 0 ? "No transactions loaded. Import a backup file to restore transactions." : "No transactions match your filters."}
+          </div>
+        ) : (
+          filtered.slice(0, 500).map(t => (
+            <LedgerRow
+              key={t.id}
+              t={t}
+              onDelete={removeTxn}
+              onEdit={() => setEditing(t)}
+            />
+          ))
+        )}
+        {filtered.length > 500 && (
+          <div style={{ marginTop: 10, color: SLATE, fontSize: 11 }}>Showing first 500 matching entries.</div>
+        )}
+      </div>
+
+      {editing && (
+        <EditTxnModal
+          txn={editing}
+          onClose={() => setEditing(null)}
+          onSave={(updated) => { updateTxn(updated); setEditing(null); }}
+        />
+      )}
     </div>
   );
 }
@@ -851,6 +1000,178 @@ function BackupModal({ onClose, onImport, onExport }) {
         Backup format: JSON · version {BACKUP_VERSION}
       </div>
     </ModalShell>
+  );
+}
+
+
+function transactionFingerprint(t) {
+  return [
+    t.type || "",
+    Number(t.amount) || 0,
+    t.category || "",
+    t.date || "",
+    t.mode || "",
+    String(t.note || "").trim().toLowerCase()
+  ].join("|");
+}
+
+function validateBackup(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("The file is not a valid JSON object.");
+  }
+  if (!Array.isArray(parsed.transactions)) {
+    throw new Error("This file is missing the transactions array.");
+  }
+  if (parsed.app && parsed.app !== "IncoAudit") {
+    throw new Error("This backup belongs to a different application.");
+  }
+
+  const rawTransactions = parsed.transactions;
+  const normalized = rawTransactions.map(normalizeTransaction);
+  const validTransactions = normalized.filter(Boolean);
+  const invalidCount = normalized.length - validTransactions.length;
+
+  const seen = new Set();
+  let duplicateCount = 0;
+  validTransactions.forEach(t => {
+    const key = transactionFingerprint(t);
+    if (seen.has(key)) duplicateCount += 1;
+    else seen.add(key);
+  });
+
+  return {
+    raw: parsed,
+    transactions: validTransactions,
+    validCount: validTransactions.length,
+    invalidCount,
+    duplicateCount,
+    budgetCount: parsed.budgets && typeof parsed.budgets === "object" ? CATEGORIES.filter(c => Number(parsed.budgets[c]) >= 0).length : 0,
+    goalCount: Array.isArray(parsed.goals) ? parsed.goals.length : 0
+  };
+}
+
+function EditTxnModal({ txn, onClose, onSave }) {
+  const [type, setType] = useState(txn.type || "expense");
+  const [amount, setAmount] = useState(String(txn.amount ?? ""));
+  const [category, setCategory] = useState(txn.category || CATEGORIES[0]);
+  const [mode, setMode] = useState(txn.mode || PAY_MODES[0]);
+  const [note, setNote] = useState(txn.note || "");
+  const [date, setDate] = useState(txn.date || "");
+
+  function submit() {
+    const n = Number(amount);
+    if (!n || n <= 0 || !date) return;
+    onSave({
+      ...txn,
+      type,
+      amount: n,
+      category: type === "income" ? "Salary" : category,
+      mode,
+      note,
+      date
+    });
+  }
+
+  return (
+    <ModalShell title="Edit transaction" onClose={onClose}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        {["expense", "income"].map(t => (
+          <button key={t} className="sf-btn" onClick={() => setType(t)} style={{
+            flex: 1, padding: "8px 0", borderRadius: 6, fontSize: 12.5, fontWeight: 600,
+            background: type === t ? INK : "#F2F0E9", color: type === t ? PAPER : INK
+          }}>{t === "expense" ? "Expense" : "Income"}</button>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <label style={{ fontSize: 11.5, color: SLATE }}>Amount (₹)
+          <input className="sf-input" type="number" value={amount} onChange={e => setAmount(e.target.value)} style={{ marginTop: 4 }} />
+        </label>
+        {type === "expense" && (
+          <label style={{ fontSize: 11.5, color: SLATE }}>Category
+            <select className="sf-input" value={category} onChange={e => setCategory(e.target.value)} style={{ marginTop: 4 }}>
+              {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+            </select>
+          </label>
+        )}
+        <label style={{ fontSize: 11.5, color: SLATE }}>Payment mode
+          <select className="sf-input" value={mode} onChange={e => setMode(e.target.value)} style={{ marginTop: 4 }}>
+            {PAY_MODES.map(m => <option key={m}>{m}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 11.5, color: SLATE }}>Date
+          <input className="sf-input" type="date" value={date} onChange={e => setDate(e.target.value)} style={{ marginTop: 4 }} />
+        </label>
+        <label style={{ fontSize: 11.5, color: SLATE }}>Note / merchant
+          <input className="sf-input" value={note} onChange={e => setNote(e.target.value)} style={{ marginTop: 4 }} />
+        </label>
+        <button className="sf-btn" onClick={submit} style={{
+          background: EMERALD, color: "#fff", padding: "10px 0", borderRadius: 7,
+          fontSize: 13.5, fontWeight: 600, marginTop: 4
+        }}>Save changes</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ImportReviewModal({ review, onChange, onClose, onConfirm }) {
+  const duplicateExcluded = review.excludeDuplicates;
+  const finalCount = review.validCount - (duplicateExcluded ? review.duplicateCount : 0);
+
+  return (
+    <ModalShell title="Review backup before import" onClose={onClose}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <FileCheck2 size={18} color={EMERALD} />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Backup validated</div>
+          <div style={{ fontSize: 10.5, color: SLATE, overflow: "hidden", textOverflow: "ellipsis" }}>{review.fileName}</div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+        <ReviewStat label="Valid transactions" value={review.validCount} />
+        <ReviewStat label="Duplicates" value={review.duplicateCount} tone={review.duplicateCount ? "warn" : "ok"} />
+        <ReviewStat label="Invalid rows" value={review.invalidCount} tone={review.invalidCount ? "warn" : "ok"} />
+        <ReviewStat label="Final import" value={finalCount} tone="ok" />
+      </div>
+
+      {review.duplicateCount > 0 && (
+        <label style={{
+          display: "flex", alignItems: "flex-start", gap: 8, padding: 10, background: GOLD_SOFT,
+          borderRadius: 7, fontSize: 11.5, lineHeight: 1.45, marginBottom: 12, cursor: "pointer"
+        }}>
+          <input
+            type="checkbox"
+            checked={duplicateExcluded}
+            onChange={e => onChange({ ...review, excludeDuplicates: e.target.checked })}
+            style={{ marginTop: 2 }}
+          />
+          <span><b>Exclude duplicate rows</b><br />Keep the first copy of each identical transaction.</span>
+        </label>
+      )}
+
+      <div style={{ fontSize: 11.5, color: SLATE, lineHeight: 1.5, marginBottom: 14 }}>
+        Importing will <b>replace</b> the current local transactions with this reviewed backup.
+        {review.budgetCount > 0 && ` ${review.budgetCount} budget categories were found.`}
+        {review.goalCount > 0 && ` ${review.goalCount} savings goals were found.`}
+      </div>
+
+      <button className="sf-btn" onClick={onConfirm} style={{
+        width: "100%", background: EMERALD, color: "#fff", padding: "10px 12px",
+        borderRadius: 7, fontSize: 13.5, fontWeight: 600
+      }}>
+        Import {finalCount} transactions
+      </button>
+    </ModalShell>
+  );
+}
+
+function ReviewStat({ label, value, tone }) {
+  const color = tone === "warn" ? RUST : tone === "ok" ? EMERALD : INK;
+  return (
+    <div style={{ border: `1px solid ${LINE}`, borderRadius: 7, padding: "9px 10px", background: "#fff" }}>
+      <div style={{ fontSize: 10, color: SLATE, marginBottom: 3 }}>{label}</div>
+      <div className="sf-mono" style={{ fontSize: 16, fontWeight: 600, color }}>{value}</div>
+    </div>
   );
 }
 
